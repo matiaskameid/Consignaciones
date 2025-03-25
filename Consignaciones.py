@@ -8,14 +8,12 @@ from io import BytesIO
 import os
 import zipfile
 import re
+import math  # <-- Para usar math.ceil en el ajuste dinámico
 
 st.title("Liquidaciones de Consignaciones")
 
 # 1) Subir el archivo Excel maestro
 uploaded_file = st.file_uploader("Sube el archivo Excel maestro (.xlsx)", type=["xlsx"])
-
-# 2) Opción para subir el logo de la empresa (opcional)
-logo_file = st.file_uploader("Sube el logo de la empresa (opcional)", type=["png", "jpg", "jpeg"])
 
 def load_default_logo():
     """
@@ -28,10 +26,8 @@ def load_default_logo():
         if os.path.exists(logo_path):
             with open(logo_path, "rb") as f:
                 return BytesIO(f.read())
-        else:
-            st.warning("Logo por defecto no encontrado en la carpeta.")
-    except Exception as e:
-        st.warning(f"No se pudo cargar el logo por defecto: {e}")
+    except Exception:
+        pass
     return None
 
 def create_export_excel(df, editorial, logo_content=None):
@@ -41,8 +37,7 @@ def create_export_excel(df, editorial, logo_content=None):
     Parámetros:
     - df: DataFrame con columnas [Unidades a liquidar, Producto, ISBN].
     - editorial: string con el nombre de la editorial en MAYÚSCULAS.
-    - logo_content: contenido en bytes del logo (no un BytesIO abierto),
-      para asegurar que podamos usarlo en cada iteración sin cerrarlo.
+    - logo_content: contenido en bytes del logo (no un BytesIO abierto).
     """
     wb = Workbook()
     ws = wb.active
@@ -54,8 +49,12 @@ def create_export_excel(df, editorial, logo_content=None):
     header_font = Font(name="Arial", size=11, bold=True)
     normal_font = Font(name="Arial", size=10)
     bold_font = Font(name="Arial", size=10, bold=True)
-    thin_border = Border(left=Side(style="thin"), right=Side(style="thin"),
-                         top=Side(style="thin"), bottom=Side(style="thin"))
+    thin_border = Border(
+        left=Side(style="thin"), 
+        right=Side(style="thin"),
+        top=Side(style="thin"), 
+        bottom=Side(style="thin")
+    )
     
     # Ajustar altura de la primera fila para dar espacio al logo
     ws.row_dimensions[1].height = 45
@@ -63,19 +62,19 @@ def create_export_excel(df, editorial, logo_content=None):
     # Insertar logo (si se proporcionó)
     if logo_content is not None:
         try:
-            # Creamos un nuevo BytesIO a partir de logo_content en cada iteración
             logo_bytes = BytesIO(logo_content)
             img = OpenpyxlImage(logo_bytes)
             img.width = 80
             img.height = 50
             ws.add_image(img, "A1")
-        except Exception as e:
-            st.warning(f"No se pudo insertar el logo: {e}")
+        except Exception:
+            pass
 
     # Título principal, en mayúsculas
     ws.merge_cells("B1:D2")
     cell_title = ws["B1"]
-    cell_title.value = f"LIQUIDACION CONSIGNACIONES {editorial}"
+    title_text = f"LIQUIDACION CONSIGNACIONES {editorial}"
+    cell_title.value = title_text
     cell_title.font = title_font
     cell_title.alignment = Alignment(horizontal="center", vertical="center")
 
@@ -115,6 +114,7 @@ def create_export_excel(df, editorial, logo_content=None):
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = thin_border
+        # Asignar un ancho fijo "base" para cada columna de la tabla
         ws.column_dimensions[get_column_letter(col_index)].width = 20
 
     # Datos de la tabla principal
@@ -152,6 +152,18 @@ def create_export_excel(df, editorial, logo_content=None):
     for col in range(6, 16385):
         ws.column_dimensions[get_column_letter(col)].hidden = True
 
+    # --- Ajuste dinámico aproximado para el título ---
+    # Medimos la longitud del texto completo y calculamos un ancho total.
+    # Luego, repartimos ese ancho entre las columnas B, C y D.
+    title_length = len(title_text)
+    approx_total_width = 2 * title_length  # factor 2 para un ajuste "cómodo"
+    width_per_col = math.ceil(approx_total_width / 3)
+
+    for col in [2, 3, 4]:  # Columnas B, C y D
+        current_width = ws.column_dimensions[get_column_letter(col)].width
+        # Asignamos el máximo entre el ancho actual y el nuevo calculado
+        ws.column_dimensions[get_column_letter(col)].width = max(current_width, width_per_col)
+
     # Guardar en BytesIO
     output = BytesIO()
     wb.save(output)
@@ -171,19 +183,21 @@ def process_master_file(file_bytes, logo_content=None):
     if "Código" in df.columns:
         df.rename(columns={"Código": "Codigo"}, inplace=True)
 
-    # Detectar columnas que contengan "consignacion" o "consignaciones" sin importar mayúsculas
+    # Detectar columnas que contengan "consignacion" o "consignaciones" (ignorar mayúsculas)
     all_cols = df.columns.tolist()
     consign_cols = [col for col in all_cols if re.search(r'consignacion', col, re.IGNORECASE)]
     
     output_files = {}
     for col in consign_cols:
-        # 1) Remover TODAS las apariciones de "CONSIGNACION" o "CONSIGNACIONES" (ignorar mayúsculas)
+        # 1) Remover "CONSIGNACION" o "CONSIGNACIONES"
         editorial_name = re.sub(r'(?i)consignacion(es)?', '', col)
         # 2) Reemplazar múltiples espacios por uno solo
         editorial_name = re.sub(r'\s+', ' ', editorial_name)
         # 3) Quitar : y otros caracteres sobrantes
         editorial_name = re.sub(r'[:]+', '', editorial_name)
-        # 4) Pasar a mayúsculas y hacer strip
+        # 4) Eliminar secuencias de dígitos (y guiones) para no incluir RUT ni similares
+        editorial_name = re.sub(r'[0-9-]+', '', editorial_name)
+        # 5) Pasar a mayúsculas y hacer strip final
         editorial_name = editorial_name.strip().upper()
         # Si no queda nada, poner "SIN EDITORIAL"
         if not editorial_name:
@@ -227,14 +241,9 @@ if uploaded_file is not None:
         # Leer el Excel en memoria
         file_bytes = BytesIO(uploaded_file.read())
         
-        # Leer el logo en memoria (como bytes sin cerrar)
-        if logo_file is not None:
-            logo_data = logo_file.read()
-            if not logo_data:
-                logo_data = None
-        else:
-            default_logo = load_default_logo()
-            logo_data = default_logo.read() if default_logo else None
+        # Cargar el logo por defecto (si existe)
+        default_logo = load_default_logo()
+        logo_data = default_logo.read() if default_logo else None
 
         results = process_master_file(file_bytes, logo_data)
 
