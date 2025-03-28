@@ -8,18 +8,38 @@ from io import BytesIO
 import os
 import zipfile
 import re
-import math  # <-- Para usar math.ceil en el ajuste dinámico
+import math
+import json
 
 st.title("Liquidaciones de Consignaciones")
 
-# 1) Subir el archivo Excel maestro
-uploaded_file = st.file_uploader("Sube el archivo Excel maestro (.xlsx)", type=["xlsx"])
+# Archivo JSON para persistir los datos de contacto
+CONTACT_DATA_FILE = "contact_data.json"
 
+def load_contact_data():
+    """Intenta leer el archivo JSON y retorna un diccionario. Si no existe, retorna {}."""
+    if os.path.exists(CONTACT_DATA_FILE):
+        try:
+            with open(CONTACT_DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            st.error(f"Error al cargar {CONTACT_DATA_FILE}: {e}")
+            return {}
+    else:
+        return {}
+
+def save_contact_data(data):
+    """Guarda el diccionario 'data' en el archivo JSON."""
+    try:
+        with open(CONTACT_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        st.success("Datos de contacto guardados correctamente.")
+    except Exception as e:
+        st.error(f"Error al guardar {CONTACT_DATA_FILE}: {e}")
+
+# Función para cargar el logo por defecto
 def load_default_logo():
-    """
-    Carga el logo por defecto (logo.png) si existe en la misma carpeta.
-    Retorna un BytesIO con los datos de la imagen o None si no se encuentra.
-    """
     try:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         logo_path = os.path.join(current_dir, "logo.png")
@@ -30,14 +50,15 @@ def load_default_logo():
         pass
     return None
 
-def create_export_excel(df, editorial, logo_content=None):
+def create_export_excel(df, editorial, logo_content=None, contact_info=None):
     """
     Genera el archivo Excel para la editorial dada, con el formato solicitado.
-    
     Parámetros:
-    - df: DataFrame con columnas [Unidades a liquidar, Producto, ISBN].
-    - editorial: string con el nombre de la editorial en MAYÚSCULAS.
-    - logo_content: contenido en bytes del logo (no un BytesIO abierto).
+      - df: DataFrame con columnas [Unidades a liquidar, Producto, ISBN].
+      - editorial: nombre de la editorial (en mayúsculas).
+      - logo_content: bytes del logo (si existe).
+      - contact_info: diccionario con datos de contacto: 
+            "PROVEEDOR", "CONTACTO", "FONO / MAIL", "DESCUENTO", "PAGO", "FECHA"
     """
     wb = Workbook()
     ws = wb.active
@@ -50,16 +71,16 @@ def create_export_excel(df, editorial, logo_content=None):
     normal_font = Font(name="Arial", size=10)
     bold_font = Font(name="Arial", size=10, bold=True)
     thin_border = Border(
-        left=Side(style="thin"), 
+        left=Side(style="thin"),
         right=Side(style="thin"),
-        top=Side(style="thin"), 
+        top=Side(style="thin"),
         bottom=Side(style="thin")
     )
     
-    # Ajustar altura de la primera fila para dar espacio al logo
+    # Altura de la primera fila para el logo
     ws.row_dimensions[1].height = 45
 
-    # Insertar logo (si se proporcionó)
+    # Insertar logo (si existe)
     if logo_content is not None:
         try:
             logo_bytes = BytesIO(logo_content)
@@ -70,7 +91,7 @@ def create_export_excel(df, editorial, logo_content=None):
         except Exception:
             pass
 
-    # Título principal, en mayúsculas
+    # Título en celdas fusionadas B1:D2
     ws.merge_cells("B1:D2")
     cell_title = ws["B1"]
     title_text = f"LIQUIDACION CONSIGNACIONES {editorial}"
@@ -78,180 +99,212 @@ def create_export_excel(df, editorial, logo_content=None):
     cell_title.font = title_font
     cell_title.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Información de cliente
+    # Información de cliente (RUT actualizado)
     ws.merge_cells("B3:D6")
     cell_cliente = ws["B3"]
     cell_cliente.value = (
         "CLIENTE: Librería Virtual y Distribuidora El Ático Ltda.\n"
         "Venta y Distribución de Libros\n"
         "General Bari 234, Providencia - Santiago, Teléfono: (56)2 21452308\n"
-        "Rut: 70.082.998-0"
+        "Rut: 76082908-0"
     )
     cell_cliente.font = normal_font
     cell_cliente.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center")
 
-    # Tabla de proveedor/contacto
+    # Tabla de proveedor/contacto (filas 8 a 13)
     fields = ["PROVEEDOR:", "CONTACTO:", "FONO / MAIL:", "DESCUENTO:", "PAGO:", "FECHA:"]
-    row_start = 8
+    row_start_contact = 8
     for i, field in enumerate(fields):
-        row_i = row_start + i
+        row_i = row_start_contact + i
         ws.cell(row=row_i, column=2, value=field).font = header_font
-        # Fusionar celdas en columnas C y D para el valor
         ws.merge_cells(start_row=row_i, start_column=3, end_row=row_i, end_column=4)
         merged_cell = ws.cell(row=row_i, column=3)
-        merged_cell.value = ""
+        key = field.replace(":", "")
+        merged_cell.value = contact_info.get(key, "") if contact_info else ""
         merged_cell.font = normal_font
-        # Aplicar bordes
         for c in range(2, 5):
             ws.cell(row=row_i, column=c).border = thin_border
 
-    # Encabezados de la tabla principal (a partir de fila 16, columna B)
+    # Tabla de datos a partir de la fila 16 (columnas B, C, D)
     start_row = 16
     start_col = 2
-    for offset, header in enumerate(df.columns):
+    headers = list(df.columns)  # ["Unidades a liquidar", "Producto", "ISBN"]
+    for offset, header in enumerate(headers):
         col_index = start_col + offset
         cell = ws.cell(row=start_row, column=col_index, value=header)
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = thin_border
-        # Asignar un ancho fijo "base" para cada columna de la tabla
-        ws.column_dimensions[get_column_letter(col_index)].width = 20
 
-    # Datos de la tabla principal
     row_counter = start_row
     for row_data in df.itertuples(index=False):
         row_counter += 1
         for offset, value in enumerate(row_data):
             col_index = start_col + offset
             cell = ws.cell(row=row_counter, column=col_index, value=value)
+            if offset == 2:  # Columna ISBN
+                try:
+                    cell.value = int(value)
+                except Exception:
+                    cell.value = value
+                cell.number_format = "0"
             cell.font = normal_font
             cell.alignment = Alignment(horizontal="left", vertical="center")
             cell.border = thin_border
 
-    # Observaciones
-    obs_row = row_counter + 2
-    ws.merge_cells(start_row=obs_row, start_column=2, end_row=obs_row+3, end_column=4)
-    obs_cell = ws.cell(row=obs_row, column=2)
-    obs_cell.value = (
-        "OBSERVACIONES:\n"
-        "1.- DESPACHAR A GENERAL BARI 234, PROVIDENCIA, SANTIAGO.\n"
-        "2.- HORARIO RECEPCION DE PEDIDOS: LUNES A VIERNES 09:30 A 13:00 Y 16:00 A 18:30"
-    )
-    obs_cell.font = bold_font
-    obs_cell.alignment = Alignment(wrap_text=True, vertical="top")
+    # Ajuste de anchos de columnas en la tabla de datos:
+    units_header = "Unidades a liquidar"
+    units_width = len(units_header) + 2
 
-    # Bordes en el bloque de observaciones
-    for r in range(obs_row, obs_row+4):
-        for c in range(2, 5):
-            ws.cell(row=r, column=c).border = thin_border
+    product_header = "Producto"
+    if not df.empty:
+        max_product_length = max(len(str(x)) for x in df["Producto"])
+    else:
+        max_product_length = len(product_header)
+    product_width = max(len(product_header), max_product_length) + 5
 
-    # Ocultar columnas F en adelante
+    isbn_width = 15
+
+    required_total_title_width = 2 * len(title_text)
+    current_total_width = units_width + product_width + isbn_width
+    if required_total_title_width > current_total_width:
+        extra = required_total_title_width - current_total_width
+        product_width += extra
+
+    ws.column_dimensions[get_column_letter(2)].width = units_width
+    ws.column_dimensions[get_column_letter(3)].width = product_width
+    ws.column_dimensions[get_column_letter(4)].width = isbn_width
+
     max_col = ws.max_column
     if max_col > 5:
         ws.delete_cols(6, max_col - 5)
     for col in range(6, 16385):
         ws.column_dimensions[get_column_letter(col)].hidden = True
 
-    # --- Ajuste dinámico aproximado para el título ---
-    # Medimos la longitud del texto completo y calculamos un ancho total.
-    # Luego, repartimos ese ancho entre las columnas B, C y D.
-    title_length = len(title_text)
-    approx_total_width = 2 * title_length  # factor 2 para un ajuste "cómodo"
-    width_per_col = math.ceil(approx_total_width / 3)
-
-    for col in [2, 3, 4]:  # Columnas B, C y D
-        current_width = ws.column_dimensions[get_column_letter(col)].width
-        # Asignamos el máximo entre el ancho actual y el nuevo calculado
-        ws.column_dimensions[get_column_letter(col)].width = max(current_width, width_per_col)
-
-    # Guardar en BytesIO
     output = BytesIO()
     wb.save(output)
     return output.getvalue()
 
-def process_master_file(file_bytes, logo_content=None):
+def process_master_file(file_bytes, logo_content=None, contact_infos=None):
     """
-    Lee el archivo maestro y genera un diccionario con {nombre_excel: contenido_en_bytes}
-    para cada editorial detectada, excluyendo stock negativo en BODEGA GENERAL BARI
-    y calculando Unidades a liquidar > 0.
+    Procesa el archivo maestro para generar liquidaciones.
+    Retorna (output_files, no_data_editorials):
+      - output_files: dict de archivos generados.
+      - no_data_editorials: lista de editoriales sin unidades a liquidar.
     """
-    # Leer la hoja principal, fila 6 como encabezado
     df = pd.read_excel(file_bytes, sheet_name=0, header=5)
     df.columns = df.columns.str.strip()
     
-    # Renombrar "Código" a "Codigo" si existe
     if "Código" in df.columns:
         df.rename(columns={"Código": "Codigo"}, inplace=True)
 
-    # Detectar columnas que contengan "consignacion" o "consignaciones" (ignorar mayúsculas)
     all_cols = df.columns.tolist()
     consign_cols = [col for col in all_cols if re.search(r'consignacion', col, re.IGNORECASE)]
     
     output_files = {}
+    no_data_editorials = []
+
     for col in consign_cols:
-        # 1) Remover "CONSIGNACION" o "CONSIGNACIONES"
         editorial_name = re.sub(r'(?i)consignacion(es)?', '', col)
-        # 2) Reemplazar múltiples espacios por uno solo
         editorial_name = re.sub(r'\s+', ' ', editorial_name)
-        # 3) Quitar : y otros caracteres sobrantes
         editorial_name = re.sub(r'[:]+', '', editorial_name)
-        # 4) Eliminar secuencias de dígitos (y guiones) para no incluir RUT ni similares
         editorial_name = re.sub(r'[0-9-]+', '', editorial_name)
-        # 5) Pasar a mayúsculas y hacer strip final
         editorial_name = editorial_name.strip().upper()
-        # Si no queda nada, poner "SIN EDITORIAL"
         if not editorial_name:
             editorial_name = "SIN EDITORIAL"
 
         required_cols = ["Producto", "Codigo", "BODEGA GENERAL BARI"]
         if not all(x in df.columns for x in required_cols):
             st.error("Faltan columnas requeridas en el archivo maestro.")
-            return {}
-        
-        # Filtrar las columnas que necesitamos
+            return {}, []
+
         temp_df = df[["Producto", "Codigo", "BODEGA GENERAL BARI", col]].copy()
         temp_df.rename(columns={col: "Consignaciones"}, inplace=True)
-        
-        # Excluir stock negativo en BODEGA GENERAL BARI
         temp_df = temp_df[temp_df["BODEGA GENERAL BARI"] >= 0]
-
-        # Calcular Unidades a liquidar
+        
         temp_df["Unidades a liquidar"] = temp_df["Consignaciones"] - temp_df["BODEGA GENERAL BARI"]
         temp_df = temp_df[temp_df["Unidades a liquidar"] > 0]
         temp_df = temp_df.sort_values(by="Producto")
-
+        
         if temp_df.empty:
+            no_data_editorials.append(editorial_name)
             continue
         
-        # Prepara DataFrame de exportación
         export_df = temp_df[["Unidades a liquidar", "Producto", "Codigo"]].copy()
         export_df.rename(columns={"Codigo": "ISBN"}, inplace=True)
-        # Limitar ISBN a 13 caracteres antes de la barra
         export_df["ISBN"] = export_df["ISBN"].astype(str).apply(lambda x: x.split("/")[0][:13])
         
-        # Generar Excel con el formato
-        excel_bytes = create_export_excel(export_df, editorial_name, logo_content)
+        contact_info = contact_infos.get(editorial_name, {}) if contact_infos else {}
+        excel_bytes = create_export_excel(export_df, editorial_name, logo_content, contact_info)
         filename = f"Liquidacion_Consignaciones_{editorial_name}.xlsx"
         output_files[filename] = excel_bytes
 
-    return output_files
+    return output_files, no_data_editorials
+
+# Cargar datos de contacto del JSON
+contact_data = load_contact_data()
+
+# Subir archivo maestro
+uploaded_file = st.file_uploader("Sube el archivo Excel maestro (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    try:
-        # Leer el Excel en memoria
-        file_bytes = BytesIO(uploaded_file.read())
-        
-        # Cargar el logo por defecto (si existe)
+    file_bytes = BytesIO(uploaded_file.read())
+    file_bytes.seek(0)
+    df_temp = pd.read_excel(file_bytes, sheet_name=0, header=5)
+    df_temp.columns = df_temp.columns.str.strip()
+    all_cols = df_temp.columns.tolist()
+    consign_cols = [col for col in all_cols if re.search(r'consignacion', col, re.IGNORECASE)]
+    editorial_names = []
+    for col in consign_cols:
+        ename = re.sub(r'(?i)consignacion(es)?', '', col)
+        ename = re.sub(r'\s+', ' ', ename)
+        ename = re.sub(r'[:]+', '', ename)
+        ename = re.sub(r'[0-9-]+', '', ename)
+        ename = ename.strip().upper()
+        if not ename:
+            ename = "SIN EDITORIAL"
+        editorial_names.append(ename)
+    unique_editorials = sorted(list(set(editorial_names)))
+    
+    st.header("Completa los datos de contacto para cada editorial")
+    contact_infos = {}
+    for ed in unique_editorials:
+        # Usar el valor guardado en el JSON o dejar vacío
+        default = contact_data.get(ed, {})
+        with st.expander(f"Datos para {ed}"):
+            proveedor = st.text_input(f"Proveedor para {ed}", value=default.get("PROVEEDOR", ""), key=f"proveedor_{ed}")
+            contacto = st.text_input(f"Contacto para {ed}", value=default.get("CONTACTO", ""), key=f"contacto_{ed}")
+            fono_mail = st.text_input(f"Fono / Mail para {ed}", value=default.get("FONO / MAIL", ""), key=f"fono_mail_{ed}")
+            descuento = st.text_input(f"Descuento para {ed}", value=default.get("DESCUENTO", ""), key=f"descuento_{ed}")
+            pago = st.text_input(f"Pago para {ed}", value=default.get("PAGO", ""), key=f"pago_{ed}")
+            fecha = st.text_input(f"Fecha para {ed}", value=default.get("FECHA", ""), key=f"fecha_{ed}")  # Puedes usar st.date_input si prefieres
+            contact_infos[ed] = {
+                "PROVEEDOR": proveedor,
+                "CONTACTO": contacto,
+                "FONO / MAIL": fono_mail,
+                "DESCUENTO": descuento,
+                "PAGO": pago,
+                "FECHA": fecha
+            }
+    
+    if st.button("Guardar Contactos"):
+        # Actualizar el archivo JSON con los nuevos datos
+        updated_data = contact_data.copy()
+        updated_data.update(contact_infos)
+        save_contact_data(updated_data)
+        # Actualizamos la variable para la sesión
+        contact_data = updated_data
+
+    if st.button("Generar Liquidaciones"):
+        file_bytes.seek(0)
         default_logo = load_default_logo()
         logo_data = default_logo.read() if default_logo else None
-
-        results = process_master_file(file_bytes, logo_data)
-
+        results, no_data_editorials = process_master_file(file_bytes, logo_data, contact_infos)
+        
         if results:
             st.success("Liquidaciones generadas para las siguientes editoriales:")
             for name in results.keys():
                 st.write("📄", name)
-            # Empaquetar en ZIP
             zip_buffer = BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                 for filename, content in results.items():
@@ -265,5 +318,8 @@ if uploaded_file is not None:
             )
         else:
             st.error("No se generaron liquidaciones (posiblemente no hay registros con unidades a liquidar > 0).")
-    except Exception as e:
-        st.error(f"Error al procesar el archivo maestro: {e}")
+
+        if no_data_editorials:
+            st.info("No se generaron liquidaciones para las siguientes editoriales porque no hay unidades a liquidar:")
+            for nd in no_data_editorials:
+                st.write("-", nd)
